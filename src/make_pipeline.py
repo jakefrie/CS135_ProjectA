@@ -12,6 +12,7 @@ def make_pipeline():
         ('my_bow_feature_extractor', CountVectorizer(min_df=1, max_df=1.0, ngram_range=(1,1))),
         ('my_classifier', sklearn.linear_model.LogisticRegression(C=1.0, max_iter=20, random_state=101)),
     ])
+    return my_bow_classifier_pipeline
 
 def fit_grid(list_of_training_text_reviews, y_tr_N):
     my_parameter_grid_by_name = dict()
