@@ -1,4 +1,8 @@
 import numpy as np
+import pandas as pd
+import os
+
+import matplotlib.pyplot as plt
 from scipy.stats import loguniform
 
 from sklearn.pipeline import Pipeline
@@ -27,17 +31,7 @@ def make_pipeline():
         ))
     ])
 
-def create_model(x_df, y_df):
-    text_series   = x_df["text"].fillna("")
-    labels_series = (y_df["Coarse Label"] == "Key Stage 4-5").astype(int)
-
-    X_tr, X_va, y_tr, y_va = train_test_split(
-        text_series, labels_series,
-        test_size=0.2, stratify=labels_series, random_state=RANDOM_STATE
-    )
-
-    pipe = make_pipeline()
-
+def make_RandomizedSearch():
     param_distributions = {
         "bow__min_df": [1, 3, 5, 10],
         "bow__max_df": [0.5, 0.7, 0.9],
@@ -60,6 +54,19 @@ def create_model(x_df, y_df):
         verbose=1
     )
 
+    return search
+
+def create_model(x_df, y_df):
+    text_series   = x_df["text"].fillna("")
+    labels_series = (y_df["Coarse Label"] == "Key Stage 4-5").astype(int)
+
+    X_tr, X_va, y_tr, y_va = train_test_split(
+        text_series, labels_series,
+        test_size=0.2, stratify=labels_series, random_state=RANDOM_STATE
+    )
+
+    search = make_RandomizedSearch()
+
     search.fit(X_tr, y_tr)
     print("Best AUROC:", search.best_score_)
     print("Best params:", search.best_params_)
@@ -70,5 +77,12 @@ def create_model(x_df, y_df):
     print("Validation AUROC:", roc_auc_score(y_va, y_val_proba))
 
     ConfusionMatrixDisplay(confusion_matrix(y_va, y_val_pred)).plot()
+    plt.show()
 
-    return search
+
+if __name__ == '__main__':
+    data_dir = 'data'
+    x_train_df = pd.read_csv(os.path.join(data_dir, 'x_train.csv'))
+    y_train_df = pd.read_csv(os.path.join(data_dir, 'y_train.csv'))
+
+    create_model(x_train_df, y_train_df)
