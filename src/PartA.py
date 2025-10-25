@@ -34,14 +34,19 @@ def make_pipeline():
 
 def make_RandomizedSearch():
     param_distributions = {
-        # Vectorizer knobs (vocabulary pruning + feature encoding)
-        "bow__min_df": [1, 3, 5, 10],
+        # ----- Vectorizer knobs -----
+        # vocabulary size can matter a lot for AUROC
+        "bow__max_features": [None, 20000, 50000, 100000],
+        # prune rare/common terms
+        "bow__min_df": [1, 3, 5, 10, 0.01],     # ints = counts; float = fraction
         "bow__max_df": [0.5, 0.7, 0.9],
+        # try adding bigrams
         "bow__ngram_range": [(1,1), (1,2)],
+        # binary vs counts
         "bow__binary": [False, True],
-        
-        # Classifier knobs
-        "clf__C": loguniform(1e-4, 1e4),
+
+        # ----- Classifier knobs -----
+        "clf__C": loguniform(1e-4, 1e4),      # regularization strength
         "clf__penalty": ["l1", "l2"]
     }
 
@@ -53,7 +58,7 @@ def make_RandomizedSearch():
     search = RandomizedSearchCV(
         make_pipeline(),
         param_distributions=param_distributions,
-        n_iter=25,                 # number of random combos to evaluate
+        n_iter=50,                 # number of random combos to evaluate
         scoring="roc_auc",         # rank-based metric robust to class imbalance
         cv=cv,                     # 5-fold stratified CV
         n_jobs=-1,                 # use all cores
@@ -75,7 +80,7 @@ def create_model(x_df, y_df, x_te_df):
     # Keep 20% aside for a final, untouched evaluation of the chosen model
     X_tr, X_va, y_tr, y_va = train_test_split(
         text_series, labels_series,
-        test_size=0.2, stratify=labels_series, random_state=RANDOM_STATE
+        test_size=0.15, stratify=labels_series, random_state=RANDOM_STATE
     )
 
     # --- 3) Build and run randomized hyperparameter search with 5-fold CV on TRAIN only ---
@@ -84,13 +89,17 @@ def create_model(x_df, y_df, x_te_df):
     best_model = search.best_estimator_
     best_model.fit(X_tr, y_tr)
 
-    final_model = make_pipeline()
-    final_model.set_params(**search.best_params_)
-    final_model.fit(text_series, labels_series)
+    # final_model = make_pipeline()
+    # final_model.set_params(**search.best_params_)
+    # final_model.fit(text_series, labels_series)
 
     # --- 5) Predict proba on the full test set and save exactly one float per line ---
-    yproba_test = final_model.predict_proba(x_te)[:, 1]
+    yproba_test = best_model.predict_proba(x_te)[:, 1]
     np.savetxt("yproba1_test.txt", yproba_test, fmt="%.6f")
+
+    y_val_proba = best_model.predict_proba(X_va)[:, 1]
+    val_auc = roc_auc_score(y_va, y_val_proba)
+    print(f"Validation AUROC of final_model: {val_auc:.4f}")
 
 
 if __name__ == '__main__':
