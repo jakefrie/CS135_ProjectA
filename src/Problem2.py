@@ -59,39 +59,32 @@ preprocess = ColumnTransformer(
 pipe_mlp = Pipeline([
     ("prep", preprocess),
     ("clf", MLPClassifier(
-        max_iter=50,
+        max_iter=150,
         early_stopping=True,
-        n_iter_no_change=5,
-        random_state=RANDOM_STATE
+        n_iter_no_change=8,
+        random_state=0,
     )),
 ])
 
-param_dist = {
-    "clf__hidden_layer_sizes": [(128,), (256,), (128,128), (256,128), (256,256)],
-    "clf__alpha": np.logspace(-6, -3, 10),
-    "clf__learning_rate_init": np.logspace(-4, -2, 10),
-    "clf__activation": ["relu", "tanh"],
+param_dist_refined = {
+    "clf__hidden_layer_sizes": [(256,), (256,128), (128,64)],
+    "clf__alpha": [1e-5, 5e-5, 1e-4],
+    "clf__learning_rate_init": [1e-4, 3e-4, 5e-4],
+    "clf__activation": ["relu"],
 }
 
 # ---------------------------------------------------------
 # 4) Cross-validation setup
 # ---------------------------------------------------------
 gkf = GroupKFold(n_splits=5)
-scorer = make_scorer(roc_auc_score, needs_proba=True)
 
 # ---------------------------------------------------------
 # 5) RandomizedSearchCV for hyperparameter tuning
 # ---------------------------------------------------------
 search = RandomizedSearchCV(
-    estimator=pipe_mlp,
-    param_distributions=param_dist,
-    n_iter=40,
-    scoring=scorer,
-    cv=gkf.split(x_train, y, groups=groups),
-    n_jobs=-1,
-    verbose=2,
-    refit=True,
-    random_state=RANDOM_STATE,
+    pipe_mlp, param_dist_refined,
+    n_iter=12, cv=gkf.split(x_train, y, groups=groups),
+    scoring=scorer, n_jobs=-1, random_state=0, verbose=2
 )
 search.fit(x_train, y)
 
