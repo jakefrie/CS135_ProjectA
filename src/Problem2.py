@@ -1,181 +1,143 @@
+import os
 import numpy as np
 import pandas as pd
-import os
+import matplotlib.pyplot as plt
 
-from scipy.stats import loguniform
 from sklearn.compose import ColumnTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold, train_test_split, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GroupKFold, RandomizedSearchCV, cross_val_predict
+from sklearn.metrics import roc_auc_score, confusion_matrix, ConfusionMatrixDisplay, make_scorer
+from sklearn.neural_network import MLPClassifier
 
 RANDOM_STATE = 0
-TEXT_COL = "text"   # <-- change this if your text column has a different name
+np.random.seed(RANDOM_STATE)
 
-# -------------------------------
-# Utilities: labels and features
-# -------------------------------
+# ---------------------------------------------------------
+# 1) Load data
+# ---------------------------------------------------------
+data_dir = 'data'
+x_train = pd.read_csv(os.path.join(data_dir, 'x_train.csv'))
+y_train = pd.read_csv(os.path.join(data_dir, 'y_train.csv'))
+x_test = pd.read_csv(os.path.join(data_dir, 'x_test.csv'))
 
-def build_target(y_df):
-    """
-    Map the 'Coarse Label' column to a binary target:
-      'Key Stage 4-5' -> 1 (positive class), else 0.
-    Returns a numpy array of shape (n_samples,).
-    """
-    return (y_df["Coarse Label"] == "Key Stage 4-5").astype(int).values
+y = y_train["Coarse Label"].map({"Key Stage 2-3": 0, "Key Stage 4-5": 1}).values
+groups = x_train["author"].values
 
-def list_numeric_feature_names(x_df):
-    """
-    Identify numeric columns to include as numeric features.
-    We drop obvious text/id columns so they don't leak into numeric branch.
-    """
-    drop_like = {"text", "title", "author", "passage_id", "id"}
-    candidate_cols = [c for c in x_df.columns if c not in drop_like]
-    num_cols = [c for c in candidate_cols if np.issubdtype(x_df[c].dtype, np.number)]
-    return num_cols
+KEYS = ["author", "title", "passage_id"]
+TEXT = "text"
+num_cols = [c for c in x_train.columns if c not in KEYS + [TEXT]]
 
-def make_tfidf_lr_search(num_cols):
-    """
-    Build a Pipeline:
-      - ColumnTransformer:
-          * 'tfidf': TfidfVectorizer applied to TEXT_COL
-          * 'num'  : StandardScaler(with_mean=False) on numeric columns
-        (with_mean=False keeps compatibility with sparse matrices)
-      - LogisticRegression(solver='liblinear') as classifier
-    Then wrap in RandomizedSearchCV over a reasonable space that explores
-    underfitting -> sweet spot -> overfitting.
+# ---------------------------------------------------------
+# 2) Feature representation
+# ---------------------------------------------------------
+tfidf = TfidfVectorizer(
+    lowercase=True,
+    strip_accents="unicode",
+    token_pattern=r"\b[a-zA-Z]+\b",
+    ngram_range=(1, 2),
+    min_df=3,
+    max_df=0.9,
+    max_features=50000,
+)
 
-    We tune:
-      - TF-IDF: n-grams, min_df, max_df
-      - LR   : C (inverse regularization), class_weight
-    """
-    # Transformer for numeric columns: scale but preserve sparsity semantics
-    # (with_mean=False is required if final matrix can be sparse)
-    numeric_scaler = StandardScaler(with_mean=False)
+num_pipe = Pipeline([("scaler", StandardScaler(with_mean=False))])
 
-    # Text vectorizer: TF-IDF
-    tfidf = TfidfVectorizer(
-        # defaults; specifics tuned via search space below
-        lowercase=True,
-        strip_accents=None
-    )
+preprocess = ColumnTransformer(
+    transformers=[
+        ("text", tfidf, TEXT),
+        ("num", num_pipe, num_cols),
+    ],
+    remainder="drop",
+    sparse_threshold=0.3,
+)
 
-    # ColumnTransformer wires each transformer to its column(s)
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("tfidf", tfidf, TEXT_COL),            # apply TF-IDF to the text column
-            ("num", numeric_scaler, num_cols),     # scale numeric feature columns
-        ],
-        remainder="drop",                          # ignore any other columns
-        sparse_threshold=0.3                       # prefer sparse if large TF-IDF dominates
-    )
-
-    # Classifier: liblinear supports sparse input well for binary LR
-    clf = LogisticRegression(
-        penalty="l2",
-        solver="liblinear",
-        max_iter=2000,
+# ---------------------------------------------------------
+# 3) Define MLP pipeline + hyperparameter space
+# ---------------------------------------------------------
+pipe_mlp = Pipeline([
+    ("prep", preprocess),
+    ("clf", MLPClassifier(
+        max_iter=50,
+        early_stopping=True,
+        n_iter_no_change=5,
         random_state=RANDOM_STATE
-    )
+    )),
+])
 
-    # Pipeline: preprocessing inside CV to avoid leakage
-    from sklearn.pipeline import Pipeline
-    pipe = Pipeline(steps=[
-        ("preprocess", preprocessor),
-        ("clf", clf)
-    ])
+param_dist = {
+    "clf__hidden_layer_sizes": [(128,), (256,), (128,128), (256,128), (256,256)],
+    "clf__alpha": np.logspace(-6, -3, 10),
+    "clf__learning_rate_init": np.logspace(-4, -2, 10),
+    "clf__activation": ["relu", "tanh"],
+}
 
-    # Hyperparameter search space:
-    # - TfidfVectorizer:
-    #     * ngram_range: unigrams vs unigrams+bigrams
-    #     * min_df: drop very rare terms to reduce noise
-    #     * max_df: drop very common terms (stop-word-ish)
-    # - LogisticRegression:
-    #     * C: inverse of regularization strength (log-uniform over wide range)
-    #     * class_weight: balance classes if needed
-    param_distributions = {
-        "preprocess__tfidf__ngram_range": [(1, 1), (1, 2)],
-        "preprocess__tfidf__min_df": [1, 2, 3, 5],
-        "preprocess__tfidf__max_df": [0.85, 0.90, 0.95, 1.0],
-        "clf__C": loguniform(1e-3, 1e2),
-        "clf__class_weight": [None, "balanced"],
-    }
+# ---------------------------------------------------------
+# 4) Cross-validation setup
+# ---------------------------------------------------------
+gkf = GroupKFold(n_splits=5)
+scorer = make_scorer(roc_auc_score, needs_proba=True)
 
-    # 5-fold stratified CV, optimize ROC-AUC
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+# ---------------------------------------------------------
+# 5) RandomizedSearchCV for hyperparameter tuning
+# ---------------------------------------------------------
+search = RandomizedSearchCV(
+    estimator=pipe_mlp,
+    param_distributions=param_dist,
+    n_iter=40,
+    scoring=scorer,
+    cv=gkf.split(x_train, y, groups=groups),
+    n_jobs=-1,
+    verbose=2,
+    refit=True,
+    random_state=RANDOM_STATE,
+)
+search.fit(x_train, y)
 
-    search = RandomizedSearchCV(
-        estimator=pipe,
-        param_distributions=param_distributions,
-        n_iter=35,                # a bit more breadth since space includes TF-IDF
-        scoring="roc_auc",
-        cv=cv,
-        n_jobs=-1,
-        random_state=RANDOM_STATE,
-        verbose=1,
-        refit=True                # best model refit on the whole training subset used in CV
-    )
-    return search
+print("\nBest hyperparameters:", search.best_params_)
+print("Best mean CV AUROC:", round(search.best_score_, 4))
 
-# -------------------------------
-# Main
-# -------------------------------
+# Save CV results
+os.makedirs("outputs_p2", exist_ok=True)
+pd.DataFrame(search.cv_results_).to_csv("outputs_p2/mlp_cv_results.csv", index=False)
 
-if __name__ == "__main__":
-    data_dir = "data"
+# ---------------------------------------------------------
+# 6) Confusion matrix on held-out predictions (CV)
+# ---------------------------------------------------------
+print("\nGenerating confusion matrix on held-out predictions...")
+y_proba_cv = cross_val_predict(
+    search.best_estimator_,
+    x_train,
+    y,
+    cv=gkf.split(x_train, y, groups=groups),
+    method="predict_proba",
+    n_jobs=-1
+)[:, 1]
 
-    # 1) Load train/test frames
-    x_train_df = pd.read_csv(os.path.join(data_dir, "x_train.csv"))
-    y_train_df = pd.read_csv(os.path.join(data_dir, "y_train.csv"))
-    x_test_df  = pd.read_csv(os.path.join(data_dir, "x_test.csv"))
+y_pred_cv = (y_proba_cv >= 0.5).astype(int)
+cm = confusion_matrix(y, y_pred_cv)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["KS2-3", "KS4-5"])
+disp.plot(values_format="d")
+plt.title("MLP Confusion Matrix (GroupKFold held-out)")
+plt.savefig("outputs_p2/mlp_confusion_matrix.png", bbox_inches="tight")
+plt.close()
 
-    # 2) Sanity checks for required columns
-    if TEXT_COL not in x_train_df.columns or TEXT_COL not in x_test_df.columns:
-        raise ValueError(
-            f"Expected a text column named '{TEXT_COL}'. "
-            "Set TEXT_COL to the correct name."
-        )
+# ---------------------------------------------------------
+# 7) Final model fit + test predictions
+# ---------------------------------------------------------
+print("\nTraining final MLP on full data...")
+best_model = search.best_estimator_
+best_model.fit(x_train, y)
 
-    # 3) Build target array
-    y = build_target(y_train_df)
+test_proba = best_model.predict_proba(x_test)[:, 1]
+np.savetxt("yproba2_test.txt", test_proba, fmt="%.7f")
+print("Saved yproba2_test.txt for leaderboard submission.")
 
-    # 4) Identify numeric feature columns (will be scaled and concatenated with TF-IDF)
-    num_cols = list_numeric_feature_names(x_train_df)
-
-    # 5) Keep only the columns we actually need for the model (text + numeric cols)
-    #    This ensures ColumnTransformer sees the exact schema during fit/transform.
-    cols_needed = [TEXT_COL] + num_cols
-    X_train_full = x_train_df[cols_needed].copy()
-    X_test_full  = x_test_df[cols_needed].copy()
-
-    # 6) Small external holdout (10%) for a sanity check outside CV.
-    #    CV remains the primary selection mechanism.
-    X_tr_df, X_va_df, y_tr, y_va = train_test_split(
-        X_train_full, y,
-        test_size=0.10, stratify=y, random_state=RANDOM_STATE
-    )
-
-    # 7) Build randomized search over TF-IDF + numeric scaler + LR
-    search = make_tfidf_lr_search(num_cols=num_cols)
-
-    # 8) Fit the search on the train split (preprocessing is inside the pipeline)
-    search.fit(X_tr_df, y_tr)
-
-    print("Best params:", search.best_params_)
-
-    # 9) Evaluate on the 10% external holdout
-    va_proba = search.best_estimator_.predict_proba(X_va_df)[:, 1]
-    val_auc = roc_auc_score(y_va, va_proba)
-    print(f"Validation AUROC (10% holdout): {val_auc:.4f}")
-
-    # 10) Train the best estimator on the same train split and produce test predictions
-    #     (Optionally, you could refit on ALL training data before test prediction:
-    #      search.refit=True already has the best model fit on all folds’ training portions.
-    #      For a final fit on ALL of X_train_full, you can do best_model.fit(X_train_full, y).)
-    best_model = search.best_estimator_
-    yproba_test = best_model.predict_proba(X_test_full)[:, 1]
-
-    # 11) Save leaderboard submission file
-    np.savetxt("yproba1_test.txt", yproba_test, fmt="%.6f")
-    print("Wrote yproba1_test.txt")
+# ---------------------------------------------------------
+# 8) Optional: summarize CV performance curve
+# ---------------------------------------------------------
+print("\nTop 5 CV configs by AUROC:")
+summary = pd.DataFrame(search.cv_results_).sort_values("mean_test_score", ascending=False).head(5)
+print(summary[["mean_test_score", "param_clf__hidden_layer_sizes", "param_clf__alpha",
+               "param_clf__learning_rate_init", "param_clf__activation"]])
