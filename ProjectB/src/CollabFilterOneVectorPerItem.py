@@ -51,7 +51,23 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
         '''
         random_state = self.random_state # inherited RandomState object
 
-        # TODO fix the lines below to have right dimensionality & values
+        # Use mean rating from training data as initial global mean
+        ratings_train = train_tuple[2]
+        mean_rating = ag_np.mean(ratings_train)
+
+        K = self.n_factors
+
+        # Global mean as 1D array of size (1,)
+        mu = ag_np.array([mean_rating])
+
+        # Per-user and per-item biases initialized near zero
+        b_per_user = ag_np.zeros(n_users)
+        c_per_item = ag_np.zeros(n_items)
+
+        # Latent factors: small random normal values
+        U = 0.01 * random_state.randn(n_users, K)
+        V = 0.01 * random_state.randn(n_items, K)
+
         # TIP: use self.n_factors to access number of hidden dimensions
         self.param_dict = dict(
             mu=ag_np.ones(1),
@@ -80,9 +96,26 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
             Scalar predicted ratings, one per provided example.
             Entry n is for the n-th pair of user_id, item_id values provided.
         '''
-        # TODO: Update with actual prediction logic
-        N = user_id_N.size
-        yhat_N = ag_np.ones(N)
+        # If parameters not passed explicitly, use current learned ones
+        if mu is None:
+            mu = self.param_dict['mu']
+            b_per_user = self.param_dict['b_per_user']
+            c_per_item = self.param_dict['c_per_item']
+            U = self.param_dict['U']
+            V = self.param_dict['V']
+
+        # Look up embeddings and biases
+        # mu is shape (1,), so treat as scalar mu[0]
+        u_vecs = U[user_id_N]        # (N, K)
+        v_vecs = V[item_id_N]        # (N, K)
+
+        dot_uv = ag_np.sum(u_vecs * v_vecs, axis=1)  # (N,)
+
+        yhat_N = mu[0] + b_per_user[user_id_N] + c_per_item[item_id_N] + dot_uv
+
+        # (Optional) you could clip to [1, 5] for evaluation if desired:
+        # yhat_N = ag_np.clip(yhat_N, 1.0, 5.0)
+
         return yhat_N
 
 
@@ -99,12 +132,22 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
         -------
         loss : float scalar
         '''
-        # TODO compute loss
-        # TIP: use self.alpha to access regularization strength
-        y_N = data_tuple[2]
-        yhat_N = self.predict(data_tuple[0], data_tuple[1], **param_dict)
-        loss_total = 0.0
-        return loss_total    
+        user_id_N, item_id_N, y_N = data_tuple
+
+        # Predictions using current params
+        yhat_N = self.predict(user_id_N, item_id_N, **param_dict)
+
+        # Squared error term (sum over batch; base class later rescales)
+        diff = yhat_N - y_N
+        sq_err = ag_np.sum(diff ** 2)
+
+        # L2 regularization on latent factors U and V
+        U = param_dict['U']
+        V = param_dict['V']
+        reg = self.alpha * (ag_np.sum(U ** 2) + ag_np.sum(V ** 2))
+
+        loss_total = sq_err + reg
+        return loss_total  
 
 
 if __name__ == '__main__':
@@ -121,3 +164,6 @@ if __name__ == '__main__':
 
     # Fit the model with SGD
     model.fit(train_tuple, valid_tuple)
+    print("Train:", model.evaluate_perf_metrics(*train_tuple))
+    print("Valid:", model.evaluate_perf_metrics(*valid_tuple))
+    print("Test: ", model.evaluate_perf_metrics(*test_tuple))

@@ -19,7 +19,7 @@ import numpy as np
 import os
 
 def load_train_valid_test_datasets(
-        data_path='data_movie_lens_100k/',
+        data_path='data/',
         n_valid=9992, # don't change this!
         n_test=10000, # don't change this!
         total_n_users=943,
