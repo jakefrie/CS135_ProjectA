@@ -70,12 +70,12 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
 
         # TIP: use self.n_factors to access number of hidden dimensions
         self.param_dict = dict(
-            mu=ag_np.ones(1),
-            b_per_user=ag_np.ones(1), # FIX dimensionality
-            c_per_item=ag_np.ones(1), # FIX dimensionality
-            U=0.001 * random_state.randn(1), # FIX dimensionality
-            V=0.001 * random_state.randn(1), # FIX dimensionality
-            )
+            mu=mu,
+            b_per_user=ag_np.array(b_per_user),
+            c_per_item=ag_np.array(c_per_item),
+            U=ag_np.array(U),
+            V=ag_np.array(V),
+        )
 
 
     def predict(self, user_id_N, item_id_N,
@@ -96,13 +96,6 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
             Scalar predicted ratings, one per provided example.
             Entry n is for the n-th pair of user_id, item_id values provided.
         '''
-        # If parameters not passed explicitly, use current learned ones
-        if mu is None:
-            mu = self.param_dict['mu']
-            b_per_user = self.param_dict['b_per_user']
-            c_per_item = self.param_dict['c_per_item']
-            U = self.param_dict['U']
-            V = self.param_dict['V']
 
         # Look up embeddings and biases
         # mu is shape (1,), so treat as scalar mu[0]
@@ -151,19 +144,50 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
 
 
 if __name__ == '__main__':
+    import matplotlib.pyplot as plt
 
     # Load the dataset
     train_tuple, valid_tuple, test_tuple, n_users, n_items = \
         load_train_valid_test_datasets()
-    # Create the model and initialize its parameters
-    # to have right scale as the dataset (right num users and items)
-    model = CollabFilterOneVectorPerItem(
-        n_epochs=10, batch_size=10000, step_size=0.1,
-        n_factors=2, alpha=0.0)
-    model.init_parameter_dict(n_users, n_items, train_tuple)
 
-    # Fit the model with SGD
-    model.fit(train_tuple, valid_tuple)
-    print("Train:", model.evaluate_perf_metrics(*train_tuple))
-    print("Valid:", model.evaluate_perf_metrics(*valid_tuple))
-    print("Test: ", model.evaluate_perf_metrics(*test_tuple))
+    Ks = [2, 10, 50]
+
+    results = {}  # store traces per K
+
+    for K in Ks:
+        print(f"\nTraining model with K = {K}")
+
+        model = CollabFilterOneVectorPerItem(
+            n_epochs=100,
+            batch_size=1000,
+            step_size=0.1,
+            n_factors=K,
+            alpha=0.0
+        )
+        model.init_parameter_dict(n_users, n_items, train_tuple)
+        model.fit(train_tuple, valid_tuple)
+
+        # Save COPY of traces so they aren't overwritten
+        results[K] = dict(
+            epoch=list(model.trace_epoch),
+            train=list(model.trace_rmse_train),
+            valid=list(model.trace_rmse_valid)
+        )
+
+    # -------------------------------------------------------------------------
+    # PLOTTING SECTION
+    # -------------------------------------------------------------------------
+
+    # Side-by-side plots: K = 2, 10, 50 (train + valid)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+
+    for ax, K in zip(axes, Ks):
+        ax.plot(results[K]['epoch'], results[K]['train'], label='Train RMSE')
+        ax.plot(results[K]['epoch'], results[K]['valid'], label='Valid RMSE')
+        ax.set_title(f"K = {K}")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("RMSE")
+        ax.legend()
+
+    plt.tight_layout()
+    plt.show()
