@@ -65,8 +65,8 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
         c_per_item = ag_np.zeros(n_items)
 
         # Latent factors: small random normal values
-        U = 0.01 * random_state.randn(n_users, K)
-        V = 0.01 * random_state.randn(n_items, K)
+        U = 0.1 * random_state.randn(n_users, K)
+        V = 0.1 * random_state.randn(n_items, K)
 
         # TIP: use self.n_factors to access number of hidden dimensions
         self.param_dict = dict(
@@ -96,7 +96,16 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
             Scalar predicted ratings, one per provided example.
             Entry n is for the n-th pair of user_id, item_id values provided.
         '''
-
+        if mu is None:
+            mu = self.mu
+        if b_per_user is None:
+            b_per_user = self.b_per_user
+        if c_per_item is None:
+            c_per_item = self.c_per_item
+        if U is None:
+            U = self.U
+        if V is None:
+            V = self.V
         # Look up embeddings and biases
         # mu is shape (1,), so treat as scalar mu[0]
         u_vecs = U[user_id_N]        # (N, K)
@@ -105,9 +114,6 @@ class CollabFilterOneVectorPerItem(AbstractBaseCollabFilterSGD):
         dot_uv = ag_np.sum(u_vecs * v_vecs, axis=1)  # (N,)
 
         yhat_N = mu[0] + b_per_user[user_id_N] + c_per_item[item_id_N] + dot_uv
-
-        # (Optional) you could clip to [1, 5] for evaluation if desired:
-        # yhat_N = ag_np.clip(yhat_N, 1.0, 5.0)
 
         return yhat_N
 
@@ -150,44 +156,63 @@ if __name__ == '__main__':
     train_tuple, valid_tuple, test_tuple, n_users, n_items = \
         load_train_valid_test_datasets()
 
-    Ks = [2, 10, 50]
+    # Hyperparameters for this experiment (Problem 1B)
+    K = 50
+    step_size = 0.6
+    n_epochs = 1000
+    batch_size = 1000
 
-    results = {}  # store traces per K
+    # Try several positive alpha values (L2 strength)
+    alpha_list = [1, 0.5, 0.1]
 
-    for K in Ks:
-        print(f"\nTraining model with K = {K}")
+    # Store traces per alpha
+    results = {}
+
+    for alpha in alpha_list:
+        print(f"\nTraining model with K={K}, alpha={alpha}")
 
         model = CollabFilterOneVectorPerItem(
-            n_epochs=100,
-            batch_size=1000,
-            step_size=0.1,
+            n_epochs=n_epochs,
+            batch_size=batch_size,
+            step_size=step_size,
             n_factors=K,
-            alpha=0.0
+            alpha=alpha,
         )
         model.init_parameter_dict(n_users, n_items, train_tuple)
         model.fit(train_tuple, valid_tuple)
 
-        # Save COPY of traces so they aren't overwritten
-        results[K] = dict(
+        # Save copies of the traces so they don't get overwritten
+        results[alpha] = dict(
             epoch=list(model.trace_epoch),
             train=list(model.trace_rmse_train),
-            valid=list(model.trace_rmse_valid)
+            valid=list(model.trace_rmse_valid),
         )
 
-    # -------------------------------------------------------------------------
-    # PLOTTING SECTION
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Figure 1B: Trace plot showing RMSE vs epoch for alpha > 0
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(8, 5))
 
-    # Side-by-side plots: K = 2, 10, 50 (train + valid)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+    for alpha in alpha_list:
+        epochs = results[alpha]['epoch']
+        train_rmse = results[alpha]['train']
+        valid_rmse = results[alpha]['valid']
 
-    for ax, K in zip(axes, Ks):
-        ax.plot(results[K]['epoch'], results[K]['train'], label='Train RMSE')
-        ax.plot(results[K]['epoch'], results[K]['valid'], label='Valid RMSE')
-        ax.set_title(f"K = {K}")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("RMSE")
-        ax.legend()
+        ax.plot(
+            epochs,
+            train_rmse,
+            label=f"train, α={alpha}",
+        )
+        ax.plot(
+            epochs,
+            valid_rmse,
+            linestyle='--',
+            label=f"valid, α={alpha}",
+        )
 
+    ax.set_xlabel("Epochs completed")
+    ax.set_ylabel("RMSE")
+    ax.set_title("K = 50, step_size = 0.6, RMSE vs. epoch for α > 0")
+    ax.legend()
     plt.tight_layout()
     plt.show()
